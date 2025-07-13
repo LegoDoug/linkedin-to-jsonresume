@@ -75,6 +75,7 @@ const toggleEnabled = (isEnabled) => {
  * @param {string[]} langs
  */
 const loadLangs = (langs) => {
+    console.log("loadLangs fired", langs);
     LANG_SELECT.innerHTML = '';
     langs.forEach((lang) => {
         const option = document.createElement('option');
@@ -86,8 +87,13 @@ const loadLangs = (langs) => {
 };
 
 const exportVCard = () => {
-    chrome.tabs.executeScript({
-        code: `liToJrInstance.generateVCard()`
+    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+        chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => {
+                liToJrInstance.generateVCard();
+            }
+        });
     });
 };
 
@@ -97,16 +103,17 @@ const exportVCard = () => {
  * @param {string | null} lang
  */
 const setLang = (lang) => {
-    chrome.tabs.executeScript(
-        {
-            code: `liToJrInstance.preferLocale = '${lang}';`
-        },
-        () => {
-            chrome.tabs.executeScript({
-                code: `console.log(liToJrInstance);console.log(liToJrInstance.preferLocale);`
-            });
-        }
-    );
+    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+        chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: (selectedLang) => {
+                liToJrInstance.preferLocale = selectedLang;
+                console.log(liToJrInstance);
+                console.log(liToJrInstance.preferLocale);
+            },
+            args: [lang]
+        });
+    });
 };
 
 /** @param {SchemaVersion} version */
@@ -160,27 +167,43 @@ chrome.runtime.onMessage.addListener((message, sender) => {
     }
 });
 
+
 document.getElementById('liToJsonButton').addEventListener('click', async () => {
     const versionOption = await getSpecVersion();
-    const runAndShowCode = getRunAndShowCode(versionOption);
-    chrome.tabs.executeScript(
-        {
-            code: `${runAndShowCode}`
-        },
-        () => {
+    const selectedLang = getSelectedLang();
+
+    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+        chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: (version, lang) => {
+                liToJrInstance.preferLocale = lang;
+                liToJrInstance.parseAndShowOutput(version);
+            },
+            args: [versionOption, selectedLang]
+        }).then(() => {
             setTimeout(() => {
-                // Close popup
                 window.close();
             }, 700);
-        }
-    );
-});
-
-document.getElementById('liToJsonDownloadButton').addEventListener('click', () => {
-    chrome.tabs.executeScript({
-        code: `liToJrInstance.preferLocale = '${getSelectedLang()}';liToJrInstance.parseAndDownload();`
+        });
     });
 });
+
+
+document.getElementById('liToJsonDownloadButton').addEventListener('click', () => {
+    const selectedLang = getSelectedLang();
+
+    chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+        chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: (lang) => {
+                liToJrInstance.preferLocale = lang;
+                liToJrInstance.parseAndDownload();
+            },
+            args: [selectedLang]
+        });
+    });
+});
+
 
 LANG_SELECT.addEventListener('change', () => {
     setLang(getSelectedLang());
@@ -201,17 +224,40 @@ SPEC_SELECT.addEventListener('change', () => {
  */
 document.getElementById('versionDisplay').innerText = chrome.runtime.getManifest().version;
 
-chrome.tabs.executeScript(
-    {
-        file: 'main.js'
-    },
-    () => {
-        chrome.tabs.executeScript({
-            code: `${createMainInstanceCode}${getLangStringsCode}`
-        });
-    }
-);
-
 getSpecVersion().then((spec) => {
     SPEC_SELECT.value = spec;
 });
+
+// Existing constants and helper functions stay the same
+
+// Replace current Init block with this:
+const initializeTab = async () => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+    await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ['main.js']
+    });
+
+    await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => {
+            const isDebug = window.location.href.includes('li2jr_debug=true');
+            window.LinkedinToResumeJson = isDebug ? LinkedinToResumeJson : window.LinkedinToResumeJson;
+            window.liToJrInstance = typeof liToJrInstance !== 'undefined'
+                ? liToJrInstance
+                : new LinkedinToResumeJson(isDebug);
+
+            (async () => {
+                const supported = await liToJrInstance.getSupportedLocales();
+                const user = liToJrInstance.getViewersLocalLang();
+                chrome.runtime.sendMessage(chrome.runtime.id, {
+                    key: 'locales',
+                    value: { supported, user }
+                });
+            })();
+        }
+    });
+};
+
+initializeTab();
